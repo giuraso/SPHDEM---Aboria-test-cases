@@ -10,5 +10,5 @@ set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--no-undefined")
 
 include_directories(${VTK_INCLUDE_DIRS} ${Boost_INCLUDE_DIR} . ../../src ../../eigen3)
 
-add_executable (SPS SPS.cpp)
-TARGET_LINK_LIBRARIES(SPS ${VTK_LIBRARIES})
+add_executable (Polydispersion Polydispersion.cpp)
+TARGET_LINK_LIBRARIES(Polydispersion ${VTK_LIBRARIES})

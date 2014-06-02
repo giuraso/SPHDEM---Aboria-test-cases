@@ -141,12 +141,14 @@ void dem_timestep(ptr<DemType> dem,
 		}
 
 	});
-
-	std::for_each(dem->begin(),dem->end(),[dt](DemType::Value& i) {
+double contdem=0.0;
+	std::for_each(dem->begin(),dem->end(),[dt,&contdem](DemType::Value& i) {
 		REGISTER_DEM_PARTICLE(i);
 
 		v = v0 + dt/2 * (f+f0);
+		contdem++;
 	});
+	std::cout<<contdem<<endl;
 }
 
 
@@ -181,6 +183,8 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 	const double sph_dens = params->sph_dens;
 	const double sph_gamma = params->sph_gamma;
 	const double sph_visc = params->sph_visc;
+	const double sph_spsound = params->sph_spsound;
+	const double sph_hfac = params->sph_hfac;
 
 	const double dem_vol = params->dem_vol;
 	const double dem_diameter = params->dem_diameter;
@@ -195,7 +199,7 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 	sph->update_positions(sph->begin(),sph->end(),[params,dt,sph_mass](SphType::Value& i) {
 		REGISTER_SPH_PARTICLE(i);
 		if (!fixed) v += dt/2 * (f+f0+fext);
-		if (params->time < params->sph_time_damping) v *= 0.98;
+		if (params->time < params->sph_time_damping) v *= 0.981;
 		return r + dt/2 * v;
 	});
 
@@ -226,6 +230,7 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 	 */
 	//std::cout << "calculate change in density"<<std::endl;
 
+const double totalmass=dem->size();
 	std::for_each(sph->begin(),sph->end(),[sph,&sph_geometry,sph_mass](SphType::Value& i) {
 		REGISTER_SPH_PARTICLE(i);
 
@@ -240,14 +245,12 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 			dddt += sph_mass*(v-vj).dot(dx*F(r/h,h));
 		}
 		dddt *= 1.0/omega;
-
 	});
-
-	/*
+		/*
 	 *  Calculate coupling force on DEM
 	 */
 	//std::cout << "calculate coupling force on DEM"<<std::endl;
-
+/*
 	std::for_each(dem->begin(),dem->end(),[sph,dem_vol,sph_mass,sph_visc,dem_diameter,sph_dens,dem_mass](DemType::Value& i) {
 		REGISTER_DEM_PARTICLE(i);
 
@@ -282,17 +285,85 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 			std::cout <<" f0 = "<<f0<<std::endl;
 		}
 	});
+	*/
+	
+	
+	
+		/*
+	 *  Calculate coupling force on DEM
+	 */
+		//std::cout << "calculate coupling force on each DEM in order to obtain the totalforce on block"<<std::endl;
 
-	/*
+	Vect3d totalf(0,0,0);
+
+		std::for_each(dem->begin(),dem->end(),[params,&totalmass,&totalf,sph,dem_vol,sph_mass,sph_visc,dem_diameter,sph_dens,dem_mass](DemType::Value& i) {
+			REGISTER_DEM_PARTICLE(i);
+
+			f0<< 0,0,0;
+			s = 0;
+			Vect3d vf(0,0,0);
+			double ef = 0;
+			for (auto tpl: i.get_neighbours(sph)) {
+				REGISTER_NEIGHBOUR_SPH_PARTICLE(tpl);
+				const double r2 = dx.squaredNorm();
+				if (r2 > 4.0*hj*hj) continue;
+				const double r = sqrt(r2);
+				const double dvWab = sph_mass*W(r/hj,hj)/rhoj;
+				f0 += fj*dvWab;
+				vf += vj*dvWab;
+				ef += ej*dvWab;
+				s += dvWab;
+			}
+			f0 /= s;
+			vf /= s;
+			ef /= s;
+
+			if (s > 0.5) {
+				Vect3d vs=(vf-v);
+				Vect3d fdrag;
+				double vmod=sqrt(pow(vs[0],2)+pow(vs[1],2)+pow(vs[2],2));
+				if ((params->time >  params->dem_time_drop/10.0) && (vmod != 0)){
+			double Re=vmod*dem_diameter/sph_visc;
+			double Cd=pow((0.63+4.8/sqrt(Re)),2);
+			double feps=pow(ef,-(3.7-0.65*exp(-(pow(1.5-log10(Re),2)/2))));
+			Vect3d fdrag = 1/8.0*Cd*feps*PI*pow(dem_diameter,2)*vmod*vs; //DallaValle DI Felice
+			//std::cout<<Re<<" "<<fdrag<<" "<<Cd<<" "<<feps<<endl;
+			}
+			else{
+			fdrag<< 0,0,0;
+			}
+	//		const Vect3d fdrag = 3.0*PI*sph_visc*dem_diameter*ef*(vf-v); //Stokes
+
+			f0 = sph_dens*(dem_vol*f0 + fdrag)/dem_mass;
+		} else {
+			f0 << 0,0,0;
+			std::cout <<" f0 = "<<f0<<std::endl;
+		}
+
+			totalf+=f0;
+	});
+	
+Vect3d accel(0,0,0);
+accel=totalf/totalmass;
+//assign to each DEM the same acceleration
+		std::for_each(dem->begin(),dem->end(),[&accel](DemType::Value& i) {
+		REGISTER_DEM_PARTICLE(i);
+
+			f0 = accel;
+			
+	});
+std::cout <<" accel = "<<accel<<std::endl;
+
+/*
 	 * 1/2 -> 1 step
 	 */
 	//std::cout << "1/2 -> 1 step"<<std::endl;
 
 	integrate_dem(dt/2,dem,params,dem_geometry); //update dem positions
-	std::for_each(sph->begin(),sph->end(),[dt,sph_mass](SphType::Value& i) {
+	std::for_each(sph->begin(),sph->end(),[dt,sph_mass,sph_hfac](SphType::Value& i) {
 		REGISTER_SPH_PARTICLE(i);
 		rho += dt * dddt;
-		h = pow(sph_mass/rho,1.0/NDIM);
+		h = sph_hfac*pow(sph_mass/rho,1.0/NDIM);
 	});
 	auto iterator_to_maxh =
 	    std::max_element(sph->begin(),sph->end(),[](SphType::Value& i, SphType::Value& j){
@@ -372,15 +443,16 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 			f0 -= dem_mass*f0j*W(r/h,h)/sj;
 		}
 		f0 /= rho;
+	
 	});
-
+	
 	dem->reset_neighbour_search(dem_diameter);
 
 	/*
 	 * acceleration on SPH calculation
 	 */
 	//std::cout << "acceleration on SPH"<<std::endl;
-
+/*
 	std::for_each(sph->begin(),sph->end(),[sph,&sph_geometry,sph_mass,sph_visc](SphType::Value& i) {
 		REGISTER_SPH_PARTICLE(i);
 
@@ -395,22 +467,58 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 			const double fdash = F(r/h,h);
 			const double fdashj = F(r/hj,hj);
 
-			/*
-			 * pressure gradient
-			 */
+			// pressure gradient
+			
 			f += -sph_mass*((1.0/omega)*pdr2*fdash + (1.0/omegaj)*pdr2j*fdashj)*dx;
 
 			const Vect3d dv = v-vj;
 			const double visc = sph_visc*(rho+rhoj)/(rho*rhoj);
 
-			/*
-			 * viscosity (morris)
-			 */
+			// viscosity (morris)
+			 
 			f += dv*sph_mass*visc*fdash;
 		}
 
 	});
+*/
 
+//adding artif viscosity
+
+
+std::for_each(sph->begin(),sph->end(),[sph,&sph_geometry,sph_mass,sph_visc,sph_spsound](SphType::Value& i) {
+		REGISTER_SPH_PARTICLE(i);
+
+		f << 0,0,0;
+		fext = sph_geometry(i);
+		for (auto tpl: i.get_neighbours(sph)) {
+			REGISTER_NEIGHBOUR_SPH_PARTICLE(tpl);
+			const double r2 = dx.squaredNorm();
+			if (r2 > 4.0*h*h) continue;
+			if (r2 == 0) continue;
+			const double r = sqrt(r2);
+			const double fdash = F(r/h,h);
+			const double fdashj = F(r/hj,hj);
+			
+			
+			double sph_art_vis=0.1;
+			Vect3d dv = v-vj;
+			double un;
+			un = (dv[0]*dx[0]+dv[1]*dx[1]+dv[2]*dx[2]);
+			const double usig=sph_spsound+un/r;
+			const double PIab= -sph_art_vis*usig*un/(2*(rho+rhoj)/2*r);
+		
+	
+			// pressure gradient
+			 
+			f += -sph_mass*(((1.0/omega)*pdr2+PIab)*fdash + ((1.0/omegaj)*pdr2j+PIab)*fdashj)*dx;
+
+			const double visc = sph_visc*(rho+rhoj)/(rho*rhoj);
+
+			// viscosity (morris)
+			f += dv*sph_mass*visc*fdash;
+		}
+
+	});
 
 	/*
 	 * 1/2 -> 1 step for velocity
@@ -421,6 +529,7 @@ void sphdem(ptr<SphType> sph,ptr<DemType> dem,
 		REGISTER_SPH_PARTICLE(i);
 
 		if (!fixed) v = v0 + dt/2 * (f+f0+fext);
+	
 	});
 
 	/*
